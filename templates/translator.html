@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Meeting Translator</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .direction-selector {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        select {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        select:hover {
+            border-color: #667eea;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-start {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .btn-start:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(76, 175, 80, 0.3);
+        }
+
+        .btn-stop {
+            background: #f44336;
+            color: white;
+        }
+
+        .btn-stop:hover {
+            background: #da190b;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(244, 67, 54, 0.3);
+        }
+
+        .btn-change {
+            background: #FF9800;
+            color: white;
+        }
+
+        .btn-change:hover {
+            background: #F57C00;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(255, 152, 0, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .status {
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 18px;
+        }
+
+        .status.inactive {
+            background: #f5f5f5;
+            color: #999;
+        }
+
+        .status.active {
+            background: #e8f5e9;
+            color: #2e7d32;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .transcript-box {
+            background: #f9f9f9;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 150px;
+            margin-bottom: 20px;
+            border: 2px solid #e0e0e0;
+        }
+
+        .transcript-label {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .transcript-text {
+            font-size: 18px;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .transcript-text.interim {
+            color: #999;
+            font-style: italic;
+        }
+
+        .translation-box {
+            background: #f0f4ff;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 150px;
+            border: 2px solid #667eea;
+        }
+
+        .translation-label {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .translation-text {
+            font-size: 20px;
+            color: #333;
+            font-weight: 500;
+            line-height: 1.6;
+        }
+
+        .indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .indicator.active {
+            background: #4CAF50;
+            animation: blink 1s infinite;
+        }
+
+        .indicator.inactive {
+            background: #ccc;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .info-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #856404;
+        }
+
+        .info-box strong {
+            display: block;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Live Meeting Translator</h1>
+        <p class="subtitle">Real-time French ⇄ English Translation</p>
+
+        <div class="controls">
+            <div class="direction-selector">
+                <select id="direction">
+                    <option value="fr-en">🇫🇷 French → 🇬🇧 English</option>
+                    <option value="en-fr">🇬🇧 English → 🇫🇷 French</option>
+                </select>
+            </div>
+            <div class="button-group">
+                <button id="startBtn" class="btn-start" onclick="startTranslation()">
+                    ▶️ Start
+                </button>
+                <button id="stopBtn" class="btn-stop" onclick="stopTranslation()" disabled>
+                    ⏹️ Stop
+                </button>
+                <button id="changeBtn" class="btn-change" onclick="changeDirection()" disabled>
+                    🔄 Switch
+                </button>
+            </div>
+        </div>
+
+        <div id="status" class="status inactive">
+            <span class="indicator inactive"></span>
+            Ready to start
+        </div>
+
+        <div class="transcript-box">
+            <div class="transcript-label">🎙️ Listening...</div>
+            <div id="transcript" class="transcript-text">Waiting for speech...</div>
+        </div>
+
+        <div class="translation-box">
+            <div class="translation-label">🔊 Translation</div>
+            <div id="translation" class="translation-text">Translation will appear here...</div>
+        </div>
+
+        <div class="info-box">
+            <strong>💡 How to use:</strong>
+            1. Select translation direction<br>
+            2. Click "Start" to begin listening<br>
+            3. Speak into your microphone<br>
+            4. Click "Switch" to change direction on the fly<br>
+            5. Click "Stop" when done
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let isActive = false;
+
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+
+        socket.on('status', (data) => {
+            isActive = data.active;
+            updateUI();
+            
+            if (data.active) {
+                document.getElementById('status').innerHTML = 
+                    `<span class="indicator active"></span>Active: ${data.direction}`;
+                document.getElementById('status').className = 'status active';
+            } else {
+                document.getElementById('status').innerHTML = 
+                    '<span class="indicator inactive"></span>Ready to start';
+                document.getElementById('status').className = 'status inactive';
+            }
+        });
+
+        socket.on('transcript', (data) => {
+            const transcriptEl = document.getElementById('transcript');
+            transcriptEl.textContent = data.text;
+            transcriptEl.className = data.is_final ? 'transcript-text' : 'transcript-text interim';
+        });
+
+        socket.on('translation_result', (data) => {
+            document.getElementById('translation').textContent = data.target;
+        });
+
+        socket.on('translation_status', (data) => {
+            if (data.status === 'translating') {
+                document.getElementById('translation').textContent = '🌍 Translating...';
+            }
+        });
+
+        socket.on('error', (data) => {
+            alert('Error: ' + data.message);
+        });
+
+        function startTranslation() {
+            const direction = document.getElementById('direction').value;
+            socket.emit('start_translation', { direction: direction });
+        }
+
+        function stopTranslation() {
+            socket.emit('stop_translation');
+            document.getElementById('transcript').textContent = 'Waiting for speech...';
+            document.getElementById('translation').textContent = 'Translation will appear here...';
+        }
+
+        function changeDirection() {
+            const direction = document.getElementById('direction').value;
+            socket.emit('change_direction', { direction: direction });
+            document.getElementById('transcript').textContent = 'Switching direction...';
+            document.getElementById('translation').textContent = 'Please wait...';
+        }
+
+        function updateUI() {
+            document.getElementById('startBtn').disabled = isActive;
+            document.getElementById('stopBtn').disabled = !isActive;
+            document.getElementById('changeBtn').disabled = !isActive;
+            document.getElementById('direction').disabled = isActive;
+        }
+
+        // Initial UI state
+        updateUI();
+    </script>
+</body>
+</html>
