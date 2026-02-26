@@ -22,6 +22,11 @@ tts_client = texttospeech.TextToSpeechClient()
 
 audio_queue = queue.Queue()
 
+# Audio device configuration
+# Run setup_audio_devices.py to find your device IDs
+INPUT_DEVICE = 2   # CABLE Output - captures Meet audio
+OUTPUT_DEVICE = 15  # CABLE Input - sends translated audio to Meet
+
 # Translation state
 translation_state = {
     'active': False,
@@ -33,13 +38,17 @@ translation_state = {
 }
 
 stream = None
-
+streaming_thread = None
+stop_streaming = threading.Event()
 
 def audio_callback(indata, frames, time_info, status):
     if status:
-        print(status)
-    if translation_state['active']:
+        print(f"⚠️  Audio callback status: {status}")
+    if translation_state['active'] and not stop_streaming.is_set():
         audio_queue.put(indata.copy())
+        # Debug: Show we're receiving audio every 100 chunks
+        if audio_queue.qsize() % 100 == 0:
+            print(f"📊 Audio queue size: {audio_queue.qsize()} (receiving audio)")
 
 
 def audio_generator():
@@ -80,13 +89,19 @@ def speak_text(text, lang_code):
     )
 
     audio_data = np.frombuffer(response.audio_content, dtype=np.int16)
-    sd.play(audio_data, RATE)
+    sd.play(
+    audio_data,
+    RATE,
+    device=OUTPUT_DEVICE
+)
     sd.wait()
 
 
 def run_streaming():
     """Background streaming translation"""
     global stream
+    
+    print(f"🎤 Starting speech recognition for {translation_state['source_lang_code']}...")
     
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
@@ -126,19 +141,35 @@ def run_streaming():
             speak_text(translated_text, translation_state['target_lang'])
             
         except Exception as e:
+            print(f"❌ Translation error: {e}")
             socketio.emit('error', {'message': str(e)})
 
-    stream = sd.InputStream(
-        samplerate=RATE,
-        blocksize=CHUNK,
-        dtype="int16",
-        channels=1,
-        callback=audio_callback,
-    )
-    
-    stream.start()
+    # Create audio input stream
+    try:
+        print(f"🎤 Opening audio input stream (device: {INPUT_DEVICE})...")
+        stream = sd.InputStream(
+            samplerate=RATE,
+            blocksize=CHUNK,
+            dtype="int16",
+            channels=1,
+            device=INPUT_DEVICE,
+            callback=audio_callback,
+        )
+        
+        stream.start()
+        print(f"✅ Audio stream started for {translation_state['source_lang_name']} → {translation_state['target_lang_name']}")
+        socketio.emit('ready', {'message': 'Listening...'})
+        
+    except Exception as e:
+        print(f"❌ Failed to start audio stream: {e}")
+        socketio.emit('error', {'message': f'Microphone error: {str(e)}'})
+        translation_state['active'] = False
+        return
 
     try:
+        print(f"🎤 Starting speech recognition for {translation_state['source_lang_code']}...")
+        print(f"📡 Connected to Google Speech API, listening for speech...")
+        
         requests = audio_generator()
         responses = speech_client.streaming_recognize(
             streaming_config,
@@ -146,7 +177,9 @@ def run_streaming():
         )
 
         for response in responses:
-            if not translation_state['active']:
+            # Check if we should stop
+            if stop_streaming.is_set() or not translation_state['active']:
+                print("🛑 Stopping stream (signal received)")
                 break
                 
             if not response.results:
@@ -162,6 +195,7 @@ def run_streaming():
                     continue
 
                 if result.is_final:
+                    print(f"✅ Final transcript: {transcript}")
                     socketio.emit('transcript', {
                         'text': transcript,
                         'is_final': True
@@ -184,11 +218,19 @@ def run_streaming():
                     })
                     
     except Exception as e:
-        socketio.emit('error', {'message': str(e)})
+        if not stop_streaming.is_set():
+            print(f"❌ Streaming error: {e}")
+            socketio.emit('error', {'message': str(e)})
     finally:
+        print("🧹 Cleaning up audio stream...")
         if stream:
-            stream.stop()
-            stream.close()
+            try:
+                stream.stop()
+                stream.close()
+            except:
+                pass
+            stream = None
+        print("✅ Stream cleanup complete")
 
 
 @app.route('/')
@@ -198,7 +240,7 @@ def index():
 
 @socketio.on('start_translation')
 def handle_start(data):
-    global translation_state
+    global translation_state, streaming_thread, stop_streaming
     
     direction = data.get('direction', 'fr-en')
     
@@ -220,10 +262,13 @@ def handle_start(data):
         })
     
     translation_state['active'] = True
+    stop_streaming.clear()
     
     # Clear audio queue
     while not audio_queue.empty():
         audio_queue.get()
+    
+    print(f"✅ Starting translation: {translation_state['source_lang_name']} → {translation_state['target_lang_name']}")
     
     emit('status', {
         'active': True,
@@ -231,32 +276,60 @@ def handle_start(data):
     })
     
     # Start streaming in background thread
-    thread = threading.Thread(target=run_streaming, daemon=True)
-    thread.start()
+    streaming_thread = threading.Thread(target=run_streaming, daemon=True)
+    streaming_thread.start()
 
 
 @socketio.on('stop_translation')
 def handle_stop():
-    global translation_state, stream
+    global translation_state, stream, stop_streaming, streaming_thread
+    
+    print("🛑 Stopping translation...")
+    stop_streaming.set()
     translation_state['active'] = False
     
     if stream:
-        stream.stop()
-        stream.close()
+        try:
+            stream.stop()
+            stream.close()
+        except:
+            pass
         stream = None
+    
+    # Wait for thread to finish
+    if streaming_thread and streaming_thread.is_alive():
+        streaming_thread.join(timeout=2)
     
     emit('status', {'active': False})
 
 
 @socketio.on('change_direction')
 def handle_change_direction(data):
-    # Stop current translation
-    handle_stop()
+    global stop_streaming, streaming_thread
     
-    # Wait a moment
-    time.sleep(0.5)
+    print(f"🔄 Changing direction to: {data.get('direction')}")
+    
+    # Signal the streaming thread to stop
+    stop_streaming.set()
+    translation_state['active'] = False
+    
+    # Wait for thread to finish
+    if streaming_thread and streaming_thread.is_alive():
+        print("⏳ Waiting for old stream to stop...")
+        streaming_thread.join(timeout=2)
+    
+    # Clear the stop flag
+    stop_streaming.clear()
+    
+    # Clear audio queue
+    while not audio_queue.empty():
+        audio_queue.get()
+    
+    # Wait a moment for cleanup
+    time.sleep(0.3)
     
     # Start with new direction
+    print("▶️  Starting new stream...")
     handle_start(data)
 
 
@@ -264,6 +337,28 @@ if __name__ == '__main__':
     print("=" * 60)
     print("  LIVE MEETING TRANSLATOR - WEB UI")
     print("=" * 60)
+    
+    # List audio devices
+    print("\n🎤 Available Audio Devices:")
+    try:
+        devices = sd.query_devices()
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                print(f"  [{i}] INPUT: {device['name']}")
+            if device['max_output_channels'] > 0:
+                print(f"  [{i}] OUTPUT: {device['name']}")
+    except Exception as e:
+        print(f"  ⚠️  Could not list devices: {e}")
+    
+    # Show current configuration
+    print(f"\n⚙️  Current Configuration:")
+    print(f"  Input Device: {INPUT_DEVICE if INPUT_DEVICE is not None else 'Default'}")
+    print(f"  Output Device: {OUTPUT_DEVICE if OUTPUT_DEVICE is not None else 'Default'}")
+    
+    if INPUT_DEVICE is None or OUTPUT_DEVICE is None:
+        print("\n⚠️  WARNING: Using default audio devices!")
+        print("   Run 'python setup_audio_devices.py' to configure")
+    
     print("\n🌐 Starting web server...")
     print("📱 Open your browser and go to: http://localhost:5000")
     print("\n💡 You can switch translation direction on the fly!")
